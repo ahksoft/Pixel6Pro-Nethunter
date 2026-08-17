@@ -1,0 +1,371 @@
+name: Pixel 6 Pro Kernel Build (raven)
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_set:
+        description: 'Feature set (FULL, KSUN, SUSFS, BBG, NET, DS)'
+        required: true
+        default: 'FULL'
+        type: choice
+        options:
+          - FULL
+          - KSUN
+          - SUSFS
+          - BBG
+          - NET
+          - DS
+      ksu_branch:
+        description: 'KernelSU-Next branch (leave empty for dev-susfs)'
+        required: false
+        default: ''
+        type: string
+      susfs_commit:
+        description: 'SUSFS commit (leave empty for latest)'
+        required: false
+        default: ''
+        type: string
+      kernel_branch:
+        description: 'Kernel manifest branch (Google official)'
+        required: false
+        default: 'android-gs-raviole-6.1-android16'
+        type: string
+
+jobs:
+  build-raven:
+    name: "Pixel 6 Pro (raven) — Google GS101 + NH/DS/KSN"
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v7
+
+    - name: Free Disk Space
+      uses: endersonmenezes/free-disk-space@v3
+      with:
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        rm_cmd: "rmz"
+        rmz_version: "3.1.1"
+        testing: false
+
+    - name: Setup Swap
+      uses: thejerrybao/setup-swap-space@v1
+      with:
+        swap-size-gb: 16
+
+    - name: Setup Build Environment
+      uses: ./.github/actions/setup-build-environment
+      with:
+        version: android14-6.1
+        sublevel: "157"
+
+    - name: Clone Google Pixel 6 Pro Kernel Source
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        echo "=== Syncing Google Pixel 6 Pro kernel (branch: ${{ inputs.kernel_branch }}) ==="
+        mkdir -p kernel
+        cd kernel
+
+        MANIFEST_BRANCH="${{ inputs.kernel_branch }}"
+
+        init_repo() {
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b "$MANIFEST_BRANCH" --depth=1 2>&1 || { echo "ERROR: repo init failed for branch $MANIFEST_BRANCH" >&2; return 1; }
+        }
+
+        init_repo || { echo "ERROR: init_repo failed" >&2; exit 1; }
+
+        MAX_RETRIES=3
+        RETRY_DELAY_SHORT=15
+        SYNC_TIMEOUT="30m"
+        attempt=1
+
+        while [ $attempt -le $MAX_RETRIES ]; do
+          echo "Attempt $attempt/$MAX_RETRIES: repo sync (timeout $SYNC_TIMEOUT)..."
+          if timeout $SYNC_TIMEOUT repo sync -c --current-branch --no-clone-bundle --no-tags --jobs-checkout=4 -j4; then
+            echo "repo sync succeeded on attempt $attempt."
+            break
+          fi
+          rc=$?
+          if [ $rc -eq 124 ]; then
+            echo "repo sync timed out after $SYNC_TIMEOUT."
+          else
+            echo "repo sync failed with exit code $rc."
+          fi
+          if [ $attempt -lt $MAX_RETRIES ]; then
+            echo "Cleaning workspace and retrying after ${RETRY_DELAY_SHORT}s..."
+            rm -rf .repo || true
+            sleep $RETRY_DELAY_SHORT
+            init_repo
+          else
+            echo "All $MAX_RETRIES attempts failed." >&2
+            exit $rc
+          fi
+          attempt=$((attempt+1))
+        done
+
+        cd common
+        KVER=$(grep -m1 '^VERSION' Makefile | awk '{print $3}')
+        KPATCH=$(grep -m1 '^PATCHLEVEL' Makefile | awk '{print $3}')
+        KSUBLEVEL=$(grep -m1 '^SUBLEVEL' Makefile | awk '{print $3}')
+        echo "Kernel version: ${KVER}.${KPATCH}.${KSUBLEVEL}"
+
+    - name: Set Build Timestamp
+      shell: bash
+      run: |
+        FIXED_BUILD_DATE="2025-08-05 04:20:00 UTC"
+        SOURCE_DATE_EPOCH=$(date -u -d "$FIXED_BUILD_DATE" +%s)
+        echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> $GITHUB_ENV
+        KBUILD_TS=$(date -u -d @${SOURCE_DATE_EPOCH} '+%a %b %d %H:%M:%S UTC %Y')
+        echo "KBUILD_BUILD_TIMESTAMP=${KBUILD_TS}" >> $GITHUB_ENV
+        GIT_DATE=$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%dT%H:%M:%SZ')
+        echo "GIT_COMMITTER_DATE=${GIT_DATE}" >> $GITHUB_ENV
+        echo "GIT_AUTHOR_DATE=${GIT_DATE}" >> $GITHUB_ENV
+
+    - name: Kernel Fixes
+      uses: ./.github/actions/kernel-fixes
+      with:
+        version: android14-6.1
+        android_version: android14
+        kernel_version: "6.1"
+        sublevel: "157"
+        os_patch_level: "2025-08"
+
+    - name: Setup KernelSU-Next
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'KSUN') }}
+      uses: ./.github/actions/kernelsu
+      with:
+        ksu_branch: ${{ inputs.ksu_branch }}
+
+    - name: SUSFS
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'SUSFS') }}
+      uses: ./.github/actions/susfs
+      with:
+        susfs_commit: ${{ inputs.susfs_commit }}
+        version: android14-6.1
+        android_version: android14
+        kernel_version: "6.1"
+        os_patch_level: "2025-08"
+        sublevel: "157"
+
+    - name: Baseband Guard
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'BBG') }}
+      uses: ./.github/actions/bbg
+
+    - name: Setup Networking
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'NET') }}
+      uses: ./.github/actions/networking
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        android_version: android14
+        sublevel: "157"
+
+    - name: DroidSpaces-OSS Patches
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'DS') }}
+      uses: ./.github/actions/droidspaces
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+
+    - name: Apply NTSync Patches
+      uses: ./.github/actions/ntsync
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        sublevel: "157"
+
+    - name: Apply Ptrace Patch
+      uses: ./.github/actions/ptrace
+      with:
+        kernel_version: "6.1"
+
+    - name: Apply Unicode Fix Patch
+      uses: ./.github/actions/unicode-fix
+      with:
+        kernel_version: "6.1"
+
+    - name: Setup Misc Configs
+      uses: ./.github/actions/misc
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        android_version: android14
+        sublevel: "157"
+        variant: ""
+
+    - name: Setup RTL8188FU WiFi Driver
+      uses: ./.github/actions/add-rtl8188fu
+      with:
+        version: android14-6.1
+
+    - name: Enable NetHunter + DroidSpaces Kernel Configs
+      uses: ./.github/actions/pixel6pro-nh-config
+      with:
+        feature_set: ${{ inputs.feature_set }}
+
+    - name: Enable BTF
+      uses: ./.github/actions/btf
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        sublevel: "157"
+
+    - name: Apply Kernel Branding
+      uses: ./.github/actions/apply-kernel-branding
+      with:
+        variant: ""
+        kernel_version: "6.1"
+        android_version: android14
+        version: android14-6.1
+        sublevel: "157"
+
+    - name: Remove Protected Exports
+      uses: ./.github/actions/remove-protected-exports
+
+    - name: Clean Kernel Flags
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        if [ -f "scripts/setlocalversion" ]; then
+          sed -i 's/-dirty//' scripts/setlocalversion
+        fi
+        git add -A
+        git diff --cached --quiet || git commit -m "Wild: Clean Dirty Flag" || true
+
+    - name: Build Kernel
+      env:
+        SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+        KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        echo "=== Building kernel with make ==="
+
+        # Install gcc cross-compiler and build deps (free-disk-space removed *llvm*)
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libelf-dev libssl-dev flex bison bc
+
+        export KCFLAGS="-O2 -Wno-error=unused-value"
+
+        # Apply the defconfig
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+
+        # Disable BTF — pahole removed by free-disk-space, not needed for this build
+        scripts/config --file .config -d DEBUG_INFO_BTF
+        scripts/config --file .config -d DEBUG_INFO_BTF_MODULES
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+
+        # Build kernel image and modules
+        set +e
+        make -j$(nproc) ARCH=arm64 \
+          LOCALVERSION= \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          Image modules 2>&1 | tee /tmp/build.log
+        BUILD_RC=$?
+        set -e
+
+        if [ $BUILD_RC -ne 0 ]; then
+          echo "::error::Kernel build failed (exit code $BUILD_RC)"
+          echo "=== Last 300 lines of build log ==="
+          tail -300 /tmp/build.log
+          exit $BUILD_RC
+        fi
+
+        echo "=== Build complete ==="
+        ls -lh arch/arm64/boot/Image 2>/dev/null || echo "Image not found at arch/arm64/boot/Image"
+        ls -lh arch/arm64/boot/Image.gz 2>/dev/null || true
+
+    - name: Extract Modules
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -uo pipefail
+        KSRC="${{ github.workspace }}/kernel/common"
+        A3="${{ github.workspace }}/AnyKernel3"
+
+        cp_module() {
+          local rel="$1" out="$2"
+          local p=""
+          # Search in multiple locations
+          for dir in "$KSRC" "$KSRC/out" /home/runner/out; do
+            if [ -f "$dir/$rel" ]; then
+              p="$dir/$rel"
+              break
+            fi
+          done
+          if [ -n "${p:-}" ] && [ -f "$p" ]; then
+            cp "$p" "$out"
+            echo "copied ${rel} from $p"
+          else
+            echo "::warning::${rel} not found in build output"
+          fi
+        }
+
+        # NetHunter wireless toolbox modules
+        while IFS='|' read -r rel out; do
+          cp_module "$rel" "$A3/$out"
+        done <<'EOF'
+        drivers/net/usb/cdc_ether.ko|cdc_ether.ko
+        drivers/net/usb/cdc_mbim.ko|cdc_mbim.ko
+        drivers/usb/class/cdc-wdm.ko|cdc-wdm.ko
+        drivers/net/usb/rndis_host.ko|rndis_host.ko
+        drivers/net/wireless/ath/ath.ko|ath.ko
+        drivers/net/wireless/ath/ath9k/ath9k_common.ko|ath9k_common.ko
+        drivers/net/wireless/ath/ath9k/ath9k_htc.ko|ath9k_htc.ko
+        drivers/net/wireless/ath/ath9k/ath9k_hw.ko|ath9k_hw.ko
+        drivers/net/wireless/mac80211_hwsim.ko|mac80211_hwsim.ko
+        drivers/net/wireless/mediatek/mt7601u/mt7601u.ko|mt7601u.ko
+        drivers/net/wireless/ralink/rt2x00/rt2800lib.ko|rt2800lib.ko
+        drivers/net/wireless/ralink/rt2x00/rt2800usb.ko|rt2800usb.ko
+        drivers/net/wireless/ralink/rt2x00/rt2x00lib.ko|rt2x00lib.ko
+        drivers/net/wireless/ralink/rt2x00/rt2x00usb.ko|rt2x00usb.ko
+        drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu.ko|rtl8xxxu.ko
+        drivers/net/wireless/realtek/rtl8188fu/rtl8188fu.ko|rtl8188fu.ko
+        net/mac80211/mac80211.ko|mac80211.ko
+        net/wireless/cfg80211.ko|cfg80211.ko
+        EOF
+
+        echo "=== Extracted modules ==="
+        ls -l "$A3/"*.ko 2>/dev/null || true
+
+        # Copy Image to AnyKernel3
+        for img in "$KSRC/arch/arm64/boot/Image" "$KSRC/out/arch/arm64/boot/Image"; do
+          if [ -f "$img" ]; then
+            cp "$img" "$A3/Image"
+            echo "Copied Image from $img"
+            break
+          fi
+        done
+        ls -lh "$A3/Image" 2>/dev/null || echo "::warning::Image not found"
+
+    - name: Upload Build Summary
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: raven-build-summary
+        path: /tmp/build-summary*.md
+        if-no-files-found: ignore
+        compression-level: 9
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: raven-AnyKernel3
+        path: ${{ github.workspace }}/AnyKernel3/**
+        if-no-files-found: ignore
+        compression-level: 9

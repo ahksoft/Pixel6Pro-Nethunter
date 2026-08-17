@@ -1,0 +1,16 @@
+{
+  "device": "raven",
+  "device_name": "Pixel 6 Pro",
+  "codename": "raviole",
+  "chipset": "GS101 (Tensor)",
+  "kernel_source": "https://github.com/ahksoft/AHK_kernal_gs.git",
+  "kernel_branch": "blu_spark-17",
+  "kernel_version": "6.1",
+  "kernel_sublevel": "157",
+  "android_version": "android14",
+  "kernel_build_version": "android14-6.1",
+  "kleaf_target": "//common:kernel_aarch64",
+  "wifi_chip": "BCM4389 (internal) + RTL8188FTV (USB adapter)",
+  "feature_set": "FULL",
+  "notes": "AHK_kernal_gs has flat layout (no common/ subdir). Workflow creates symlink: ln -s . kernel/common"
+}

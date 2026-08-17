@@ -1,0 +1,232 @@
+name: 'Pixel 6 Pro NetHunter Config Overlay'
+description: 'Enable NetHunter, DroidSpaces, and wireless toolbox configs on the GS101 (raven) defconfig'
+
+inputs:
+  feature_set:
+    description: 'Feature set (FULL, KSUN, SUSFS, BBG, NET, DS)'
+    required: true
+    default: 'FULL'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Enable NetHunter Kernel Configs
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        echo "=== Applying NetHunter config overlay to $DEFCONFIG ==="
+
+        # Helper: append or replace config line in defconfig
+        apply_config() {
+          local cfg="$1"
+          local key=$(echo "$cfg" | cut -d= -f1)
+          if grep -qE "^${key}=" "$DEFCONFIG"; then
+            sed -i "s|^${key}=.*|${cfg}|" "$DEFCONFIG"
+          elif grep -qE "^# ${key} is not set" "$DEFCONFIG"; then
+            sed -i "s|^# ${key} is not set|${cfg}|" "$DEFCONFIG"
+          else
+            echo "$cfg" >> "$DEFCONFIG"
+          fi
+        }
+
+        # === Wireless Vendor Gates (REQUIRED: without these, vendor Kconfig subtrees are invisible) ===
+        apply_config "CONFIG_WLAN_VENDOR_ATH=y"
+        apply_config "CONFIG_WLAN_VENDOR_MEDIATEK=y"
+        apply_config "CONFIG_WLAN_VENDOR_RALINK=y"
+        apply_config "CONFIG_WLAN_VENDOR_REALTEK=y"
+
+        # === cfg80211 / mac80211 (as modules for external WiFi adapter support) ===
+        apply_config "CONFIG_CFG80211=m"
+        apply_config "CONFIG_NL80211_TESTMODE=y"
+        apply_config "CONFIG_CFG80211_CERTIFICATION_ONUS=y"
+        apply_config "CONFIG_CFG80211_REG_CELLULAR_HINTS=y"
+        apply_config "CONFIG_MAC80211=m"
+        apply_config "CONFIG_MAC80211_HWSIM=m"
+        apply_config "CONFIG_WIRELESS_EXT=y"
+
+        # === RTL8188FU (external USB WiFi adapter) ===
+        apply_config "CONFIG_RTL8188FU=m"
+
+        # === In-tree wireless toolbox modules ===
+        apply_config "CONFIG_ATH9K_HTC=m"
+        apply_config "CONFIG_RT2X00=m"
+        apply_config "CONFIG_RT2800USB=m"
+        apply_config "CONFIG_RTL8XXXU=m"
+        apply_config "CONFIG_RTL8XXXU_UNTESTED=y"
+        apply_config "CONFIG_MT7601U=m"
+
+        # === USB network drivers ===
+        apply_config "CONFIG_USB_WDM=m"
+        apply_config "CONFIG_USB_NET_RNDIS_HOST=m"
+        apply_config "CONFIG_USB_NET_CDC_ETHER=m"
+        apply_config "CONFIG_USB_NET_CDC_MBIM=m"
+
+        # === USB/IP (for over-the-network USB device sharing) ===
+        apply_config "CONFIG_USBIP_CORE=y"
+        apply_config "CONFIG_USBIP_VHCI_HCD=y"
+        apply_config "CONFIG_USBIP_HOST=y"
+
+        # === USB gadget RNDIS (network-over-USB for Nethunter) ===
+        apply_config "CONFIG_USB_CONFIGFS_F_RNDIS=y"
+
+        # === iptables TEE target (packet cloning/mirroring) ===
+        apply_config "CONFIG_IP_NF_TARGET_TEE=y"
+
+        # === Bluetooth full stack (HCI, RFCOMM, HIDP, etc.) ===
+        apply_config "CONFIG_BT_RFCOMM=m"
+        apply_config "CONFIG_BT_RFCOMM_TTY=y"
+        apply_config "CONFIG_BT_HIDP=m"
+        apply_config "CONFIG_BT_HCIVHCI=m"
+        apply_config "CONFIG_BT_HCIUART=m"
+        apply_config "CONFIG_BT_HCIUART_LL=y"
+        apply_config "CONFIG_BT_HCIUART_BCM=y"
+        apply_config "CONFIG_BT_HCIUART_QCA=y"
+
+        # === HID (USB keyboard/mouse/gamepad for Nethunter OTG) ===
+        apply_config "CONFIG_USB_HIDDEV=y"
+        apply_config "CONFIG_HID_UHID=y"
+        apply_config "CONFIG_HID_GAFF=y"
+        apply_config "CONFIG_HID_TOPMAX=y"
+        apply_config "CONFIG_HID_SMARTJOYPLUS=y"
+        apply_config "CONFIG_HID_THRUSTMASTER=y"
+        apply_config "CONFIG_HID_XINMO=y"
+
+        # === Extra Netfilter targets/matches ===
+        apply_config "CONFIG_NETFILTER_XT_TARGET_TPROXY=y"
+        apply_config "CONFIG_NETFILTER_XT_MATCH_PHYSDEV=y"
+        apply_config "CONFIG_NF_CONNTRACK_BRIDGE=y"
+
+        # === VLAN 802.1Q (already in GS defconfig as =m, ensure it) ===
+        apply_config "CONFIG_VLAN_8021Q=m"
+
+        # === Additional NetHunter essentials ===
+        apply_config "CONFIG_PPP=m"
+        apply_config "CONFIG_PPP_BSDCOMP=m"
+        apply_config "CONFIG_PPP_DEFLATE=m"
+        apply_config "CONFIG_PPP_MPPE=m"
+        apply_config "CONFIG_PPTP=m"
+        apply_config "CONFIG_PPPOL2TP=m"
+        apply_config "CONFIG_SLHC=m"
+
+        echo "=== NetHunter config overlay complete ==="
+
+    - name: Enable DroidSpaces Container Configs
+      if: ${{ inputs.feature_set == 'FULL' || contains(inputs.feature_set, 'DS') }}
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        echo "=== Applying DroidSpaces config overlay ==="
+
+        apply_config() {
+          local cfg="$1"
+          local key=$(echo "$cfg" | cut -d= -f1)
+          if grep -qE "^${key}=" "$DEFCONFIG"; then
+            sed -i "s|^${key}=.*|${cfg}|" "$DEFCONFIG"
+          elif grep -qE "^# ${key} is not set" "$DEFCONFIG"; then
+            sed -i "s|^# ${key} is not set|${cfg}|" "$DEFCONFIG"
+          else
+            echo "$cfg" >> "$DEFCONFIG"
+          fi
+        }
+
+        # === Namespaces (DroidSpaces needs full namespace support) ===
+        apply_config "CONFIG_NAMESPACES=y"
+        apply_config "CONFIG_UTS_NS=y"
+        apply_config "CONFIG_IPC_NS=y"
+        apply_config "CONFIG_USER_NS=y"
+        apply_config "CONFIG_PID_NS=y"
+        apply_config "CONFIG_NET_NS=y"
+        apply_config "CONFIG_CGROUP_NS=y"
+
+        # === Cgroups (container resource management) ===
+        apply_config "CONFIG_CGROUPS=y"
+        apply_config "CONFIG_MEMCG=y"
+        apply_config "CONFIG_BLK_CGROUP=y"
+        apply_config "CONFIG_CGROUP_SCHED=y"
+        apply_config "CONFIG_CGROUP_FREEZER=y"
+        apply_config "CONFIG_CPUSETS=y"
+        apply_config "CONFIG_CGROUP_CPUACCT=y"
+        apply_config "CONFIG_CGROUP_BPF=y"
+        apply_config "CONFIG_CGROUP_NET_PRIO=y"
+        apply_config "CONFIG_CGROUP_PERF=y"
+        apply_config "CONFIG_CGROUP_RDMA=y"
+
+        # === SYSVIPC (POSIX IPC for containers) ===
+        apply_config "CONFIG_SYSVIPC=y"
+        apply_config "CONFIG_POSIX_MQUEUE=y"
+
+        # === devtmpfs (device nodes in containers) ===
+        apply_config "CONFIG_DEVTMPFS=y"
+        apply_config "CONFIG_DEVTMPFS_MOUNT=y"
+
+        # === binfmt_misc (running non-native binaries) ===
+        apply_config "CONFIG_BINFMT_MISC=y"
+
+        # === VETH (virtual ethernet pairs for container networking) ===
+        apply_config "CONFIG_VETH=y"
+
+        # === Bridge networking ===
+        apply_config "CONFIG_BRIDGE=y"
+        apply_config "CONFIG_BRIDGE_NETFILTER=m"
+
+        # === Overlay filesystem (container layers) ===
+        apply_config "CONFIG_OVERLAY_FS=y"
+
+        # === vsock (host-container communication) ===
+        apply_config "CONFIG_VSOCKETS=y"
+        apply_config "CONFIG_VSOCKETS_DIAG=m"
+
+        echo "=== DroidSpaces config overlay complete ==="
+
+    - name: Register modules with kleaf
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        echo "=== Registering NH modules with kleaf ==="
+        # The register_modules.py from add-rtl8188fu handles this for the
+        # standard GKI module list. For GS, we need to also register the
+        # wireless toolbox modules if not already present.
+        python3 "${{ github.workspace }}/.github/actions/add-rtl8188fu/register_modules.py" .
+        echo "=== Module registration complete ==="
+
+    - name: Verify defconfig
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        echo "=== Verifying critical NetHunter configs in $DEFCONFIG ==="
+        for cfg in \
+          CONFIG_WLAN_VENDOR_ATH \
+          CONFIG_WLAN_VENDOR_MEDIATEK \
+          CONFIG_WLAN_VENDOR_RALINK \
+          CONFIG_WLAN_VENDOR_REALTEK \
+          CONFIG_CFG80211 \
+          CONFIG_MAC80211 \
+          CONFIG_RTL8188FU \
+          CONFIG_RT2X00 \
+          CONFIG_RT2800USB \
+          CONFIG_ATH9K_HTC \
+          CONFIG_RTL8XXXU \
+          CONFIG_MT7601U \
+          CONFIG_USBIP_CORE \
+          CONFIG_USB_CONFIGFS_F_RNDIS \
+          CONFIG_BT_RFCOMM \
+          CONFIG_NAMESPACES \
+          CONFIG_CGROUPS \
+          CONFIG_OVERLAY_FS \
+          CONFIG_VETH; do
+          if grep -q "^${cfg}=" "$DEFCONFIG"; then
+            echo "  ✓ $cfg = $(grep "^${cfg}=" "$DEFCONFIG" | cut -d= -f2)"
+          elif grep -qE "^# ${cfg} is not set" "$DEFCONFIG"; then
+            echo "  ✗ $cfg is NOT SET (will be dropped by olddefconfig)"
+          else
+            echo "  ~ $cfg not present (will default)"
+          fi
+        done
+        echo "=== Verification complete ==="

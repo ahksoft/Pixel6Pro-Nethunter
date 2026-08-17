@@ -1,0 +1,121 @@
+name: 'Build Kernel'
+description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
+inputs:
+  bypass:
+    description: 'Whether to add the bypass hack or not'
+    required: true
+  version:
+    description: 'Kernel config version (e.g., android14-6.1)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - name: 'Activate Bypass'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel
+    run: |
+      set -euo pipefail
+      if [ "${{ inputs.bypass }}" = "true" ]; then
+        if [[ ${{ inputs.version }} == "android14-6.1" || ${{ inputs.version }} == "android15-6.6" || ${{ inputs.version }} == "android16-6.12" ]]; then
+          TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module/version.c"
+        else
+          TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module.c"
+        fi
+
+        sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
+
+        if ! grep -A 5 "bad_version:" "$TARGET_FILE" | grep -q "return 1;"; then
+          echo "Patch failed! 'return 1;' not found at bad_version:"
+          grep -A 10 "bad_version:" "$TARGET_FILE" || true
+          exit 1
+        fi
+      else
+        echo "Bypass hack not applied as per input parameter."
+      fi
+
+  - name: Setup Kernel Configs
+    if: false
+    uses: ./.github/actions/set-kernel-config
+  
+  - name: 'Build Kernel'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel
+    run: |
+      sed -i 's/check_defconfig//' ./common/build.config.gki
+      if [ -f "build/build.sh" ]; then
+        BUILD_GKI_ARTIFACTS="" \
+        BUILD_GKI_CERTIFICATION_TOOLS=0 \
+        BUILD_SYSTEM_DLKM=0 \
+        SKIP_VENDOR_BOOT=1 \
+        SKIP_EXT_MODULES=1 \
+        SKIP_CP_KERNEL_HDR=1 \
+        OUT_DIR="/home/runner/out" \
+        LTO=thin \
+        BUILD_CONFIG=common/build.config.gki.aarch64 \
+        build/build.sh -j"$(nproc)" \
+        CC="/usr/bin/ccache clang" \
+        CXX="/usr/bin/ccache clang+" \
+        HOSTCC="/usr/bin/ccache clang" \
+        HOSTCXX="/usr/bin/ccache clang+"
+      else
+        if [ "${{ inputs.bypass }}" = "false" ]; then
+          sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+        fi
+        # Build the full kernel_build target for kleaf-based versions so the
+        # in-tree modules (rtl8188fu.ko) are produced as exposed outputs; the
+        # Image path below stays the same.
+        if [[ " android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18 " == *" ${{ inputs.version }} "* ]]; then
+          TARGET="//common:kernel_aarch64"
+          # module_implicit_outs files are not in the default output group, but
+          # kleaf registers every declared output file as its own output group
+          # named by the module path. Request them so the .ko files are
+          # materialized in bazel-bin and build.yml can extract rtl8188fu.ko.
+          OUTGROUPS="--output_groups=+default,drivers/net/usb/cdc_ether.ko,drivers/net/usb/cdc_mbim.ko,drivers/net/usb/rndis_host.ko,drivers/usb/class/cdc-wdm.ko,drivers/net/wireless/ath/ath.ko,drivers/net/wireless/ath/ath9k/ath9k_common.ko,drivers/net/wireless/ath/ath9k/ath9k_htc.ko,drivers/net/wireless/ath/ath9k/ath9k_hw.ko,drivers/net/wireless/mac80211_hwsim.ko,drivers/net/wireless/mediatek/mt7601u/mt7601u.ko,drivers/net/wireless/ralink/rt2x00/rt2800lib.ko,drivers/net/wireless/ralink/rt2x00/rt2800usb.ko,drivers/net/wireless/ralink/rt2x00/rt2x00lib.ko,drivers/net/wireless/ralink/rt2x00/rt2x00usb.ko,drivers/net/wireless/realtek/rtl8xxxu/rtl8xxxu.ko,drivers/net/wireless/realtek/rtl8188fu/rtl8188fu.ko,net/mac80211/mac80211.ko,net/wireless/cfg80211.ko"
+        else
+          TARGET="//common:kernel_aarch64/Image"
+          OUTGROUPS=""
+        fi
+        tools/bazel build \
+          --config=fast \
+          --config=stamp \
+          --disk_cache=/home/runner/.cache/bazel \
+          ${OUTGROUPS} \
+          "$TARGET"
+      fi
+
+  - name: 'Gather Build Artifacts'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel
+    run: |
+      set -euo pipefail
+      if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
+        echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
+        if [[ ${{ inputs.bypass }} == "true" ]]; then
+          cp "bazel-bin/common/kernel_aarch64/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+        else
+          cp "bazel-bin/common/kernel_aarch64/Image" "${{ github.workspace }}/AnyKernel3/Image"
+        fi
+        exit 0
+        fi
+      if [ -f "/home/runner/out/dist/Image" ]; then
+        echo "Found Image at /home/runner/out/dist/Image"
+        if [[ ${{ inputs.bypass }} == "true" ]]; then
+          cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+        else
+          cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
+        fi
+        exit 0
+      fi
+
+      exit 1
+
+  - name: 'Patch AnyKernel3 for Bypass Hack'
+    shell: bash
+    if: ${{ inputs.bypass == 'true' }}
+    working-directory: ${{ github.workspace }}/AnyKernel3
+    run: |
+      set -euo pipefail
+      cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
+      patch -p1 < bypass.patch
+

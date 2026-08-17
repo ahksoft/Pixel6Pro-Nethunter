@@ -1,0 +1,12 @@
+kernel/
+kernels/
+bbr/
+testing/
+AIO-REJ/
+*.ko
+*.o
+*.cmd
+*.mod
+*.mod.c
+ Module.symvers
+modules.order

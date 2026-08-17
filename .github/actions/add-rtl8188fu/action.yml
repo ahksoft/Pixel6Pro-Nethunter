@@ -1,0 +1,115 @@
+name: 'Add RTL8188FU WiFi Driver'
+description: 'Integrate the Realtek RTL8188FTV (rtl8188fu) driver into the kernel tree and enable cfg80211/mac80211'
+
+inputs:
+  version:
+    description: 'Kernel config version (e.g., android14-6.1)'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Clone rtl8188fu driver
+      shell: bash
+      run: |
+        set -euo pipefail
+        DRIVER_DIR="${{ runner.temp }}/rtl8188fu"
+        rm -rf "$DRIVER_DIR"
+        git clone --depth 1 https://github.com/kelebek333/rtl8188fu.git "$DRIVER_DIR"
+        cd "$DRIVER_DIR"
+        # Pin to the commit validated for linux 6.1 in-tree module builds.
+        git checkout --detach c8c95708b3756c67139c456a2a6576c1e6491d82
+
+        # Monitor mode + power saving tweaks (see /AGENTS.md).
+        sed -i 's/^CONFIG_POWER_SAVING = y$/CONFIG_POWER_SAVING = n/' Makefile
+        sed -i 's/^CONFIG_WIFI_MONITOR = n$/CONFIG_WIFI_MONITOR = y/' Makefile
+        grep -n '^CONFIG_POWER_SAVING\|^CONFIG_WIFI_MONITOR' Makefile
+
+    - name: Copy driver into kernel tree
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEST="drivers/net/wireless/realtek/rtl8188fu"
+        rm -rf "$DEST"
+        cp -a "${{ runner.temp }}/rtl8188fu" "$DEST"
+        rm -rf "$DEST/.git"
+        test -f "$DEST/Kconfig" && echo "Kconfig present"
+        test -f "$DEST/Makefile" && echo "Makefile present"
+
+    - name: Embed RTL8188FU firmware into module
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEST="drivers/net/wireless/realtek/rtl8188fu"
+        python3 "${{ github.action_path }}/embed_fw.py" "$DEST"
+        grep -n "CONFIG_RTL8188FU_EMBEDDED_FW" "$DEST/Makefile"
+        grep -n "embedded_fw" "$DEST/Makefile"
+
+    - name: Fix driver Kconfig syntax
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        KCFG="drivers/net/wireless/realtek/rtl8188fu/Kconfig"
+        # '---help---' was removed from kconfig; modern kernels only accept 'help'.
+        sed -i 's/^[[:space:]]*---help---$/	help/' "$KCFG"
+        grep -n "help" "$KCFG"
+
+    - name: Wire driver into realtek Kconfig
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        KCONFIG="drivers/net/wireless/realtek/Kconfig"
+        # Insert the source line right after 'if WLAN_VENDOR_REALTEK' so the
+        # entry only appears when the realtek vendor menu is enabled.
+        if ! grep -q 'drivers/net/wireless/realtek/rtl8188fu/Kconfig' "$KCONFIG"; then
+          sed -i '/^if WLAN_VENDOR_REALTEK$/a source "drivers/net/wireless/realtek/rtl8188fu/Kconfig"' "$KCONFIG"
+        fi
+        grep -n 'rtl8188fu' "$KCONFIG"
+
+    - name: Wire driver into realtek Makefile
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        MK="drivers/net/wireless/realtek/Makefile"
+        if ! grep -q 'rtl8188fu' "$MK"; then
+          echo 'obj-$(CONFIG_RTL8188FU)		+= rtl8188fu/' >> "$MK"
+        fi
+        tail -n 3 "$MK"
+
+    - name: Register wireless modules with kleaf (modules.bzl / BUILD.bazel)
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        python3 "${{ github.action_path }}/register_modules.py" .
+        grep -n 'rtl8188fu.ko' modules.bzl BUILD.bazel 2>/dev/null || true
+
+    - name: Enable driver + wireless configs (kleaf versions)
+      if: ${{ !(inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10') }}
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_WLAN_VENDOR_REALTEK=y
+          CONFIG_RTL8188FU=m
+          CONFIG_CFG80211=m
+          CONFIG_NL80211_TESTMODE=y
+          CONFIG_CFG80211_CERTIFICATION_ONUS=y
+          CONFIG_CFG80211_REG_CELLULAR_HINTS=y
+          CONFIG_MAC80211=m
+          CONFIG_MAC80211_HWSIM=m
+
+    - name: Enable driver + wireless configs (5.10 build.sh; cfg80211/mac80211 stay built-in)
+      if: ${{ inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' }}
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_WLAN_VENDOR_REALTEK=y
+          CONFIG_RTL8188FU=m
+          CONFIG_NL80211_TESTMODE=y
+          CONFIG_CFG80211_CERTIFICATION_ONUS=y
+          CONFIG_CFG80211_REG_CELLULAR_HINTS=y
