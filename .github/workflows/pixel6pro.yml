@@ -29,14 +29,14 @@ on:
         default: ''
         type: string
       kernel_branch:
-        description: 'Kernel manifest branch (Google official)'
+        description: 'AHK_knal_gs branch'
         required: false
-        default: 'android-gs-raviole-6.1-android16'
+        default: 'blu_spark-17'
         type: string
 
 jobs:
   build-raven:
-    name: "Pixel 6 Pro (raven) — Google GS101 + NH/DS/KSN"
+    name: "Pixel 6 Pro (raven) — AHK GS + NH/DS/KSN"
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
@@ -69,54 +69,21 @@ jobs:
         version: android14-6.1
         sublevel: "157"
 
-    - name: Clone Google Pixel 6 Pro Kernel Source
+    - name: Clone AHK Kernel Source
       shell: bash
       working-directory: ${{ github.workspace }}
       run: |
         set -euo pipefail
-        echo "=== Syncing Google Pixel 6 Pro kernel (branch: ${{ inputs.kernel_branch }}) ==="
+        echo "=== Cloning AHK_knal_gs (${{ inputs.kernel_branch }}) ==="
         mkdir -p kernel
-        cd kernel
+        echo "${{ github.token }}" | gh auth login --with-token
+        gh auth setup-git
+        git clone --depth 1 \
+          -b "${{ inputs.kernel_branch }}" \
+          https://github.com/ahksoft/AHK_kernal_gs.git \
+          kernel/common
 
-        MANIFEST_BRANCH="${{ inputs.kernel_branch }}"
-
-        init_repo() {
-          repo init -u https://android.googlesource.com/kernel/manifest \
-            -b "$MANIFEST_BRANCH" --depth=1 2>&1 || { echo "ERROR: repo init failed for branch $MANIFEST_BRANCH" >&2; return 1; }
-        }
-
-        init_repo || { echo "ERROR: init_repo failed" >&2; exit 1; }
-
-        MAX_RETRIES=3
-        RETRY_DELAY_SHORT=15
-        SYNC_TIMEOUT="30m"
-        attempt=1
-
-        while [ $attempt -le $MAX_RETRIES ]; do
-          echo "Attempt $attempt/$MAX_RETRIES: repo sync (timeout $SYNC_TIMEOUT)..."
-          if timeout $SYNC_TIMEOUT repo sync -c --current-branch --no-clone-bundle --no-tags --jobs-checkout=4 -j4; then
-            echo "repo sync succeeded on attempt $attempt."
-            break
-          fi
-          rc=$?
-          if [ $rc -eq 124 ]; then
-            echo "repo sync timed out after $SYNC_TIMEOUT."
-          else
-            echo "repo sync failed with exit code $rc."
-          fi
-          if [ $attempt -lt $MAX_RETRIES ]; then
-            echo "Cleaning workspace and retrying after ${RETRY_DELAY_SHORT}s..."
-            rm -rf .repo || true
-            sleep $RETRY_DELAY_SHORT
-            init_repo
-          else
-            echo "All $MAX_RETRIES attempts failed." >&2
-            exit $rc
-          fi
-          attempt=$((attempt+1))
-        done
-
-        cd common
+        cd kernel/common
         KVER=$(grep -m1 '^VERSION' Makefile | awk '{print $3}')
         KPATCH=$(grep -m1 '^PATCHLEVEL' Makefile | awk '{print $3}')
         KSUBLEVEL=$(grep -m1 '^SUBLEVEL' Makefile | awk '{print $3}')
@@ -259,6 +226,15 @@ jobs:
         # Install gcc cross-compiler and build deps (free-disk-space removed *llvm*)
         sudo apt-get update -qq
         sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libelf-dev libssl-dev flex bison bc
+
+        # AHK_knal_gs hardcodes CROSS_COMPILE and KBUILD_OUTPUT in Makefile.
+        # Override them: clear KBUILD_OUTPUT (use in-tree build), set CROSS_COMPILE.
+        sed -i 's|^KBUILD_OUTPUT :=.*|KBUILD_OUTPUT :=|' Makefile
+        sed -i 's|^CROSS_COMPILE.*?=.*|CROSS_COMPILE ?= aarch64-linux-gnu-|' Makefile
+
+        # Verify overrides
+        grep '^KBUILD_OUTPUT' Makefile
+        grep '^CROSS_COMPILE' Makefile
 
         export KCFLAGS="-O2 -Wno-error=unused-value"
 
